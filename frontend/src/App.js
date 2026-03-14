@@ -400,20 +400,26 @@ function VoicePanel({ context }) {
   };
 
   // Simulate mic toggle (real Nova 2 Sonic needs WebSocket streaming)
-  const toggleMic = () => {
-    if (recording) {
-      setRecording(false);
-      // In production: stop audio recording, send PCM to backend Nova Sonic endpoint
-      // For now: prompt user to type
-    } else {
-      setRecording(true);
-      // In production: start Web Audio API capture
-      setTimeout(() => {
-        setRecording(false);
-        setInput("Why is my code failing?"); // placeholder for real STT output
-      }, 2000);
-    }
+const toggleMic = () => {
+  if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+    alert("Speech recognition not supported in this browser. Use Chrome.");
+    return;
+  }
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  setRecording(true);
+  recognition.start();
+  recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    setRecording(false);
+    sendMessage(transcript);
   };
+  recognition.onerror = () => setRecording(false);
+  recognition.onend = () => setRecording(false);
+};
 
   return (
     <div className="voice-layout">
