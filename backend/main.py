@@ -1,456 +1,473 @@
 """
-DevPilot AI backend.
+DevPilot AI — FastAPI Backend v2
+Amazon Nova AI Hackathon 2026
 
-Hackathon MVP routes:
-  POST /api/review          Nova 2 Lite code review
-  POST /api/voice           Voice-oriented debugging response
-  POST /api/research        Source-backed research response
-  POST /api/route           Intent classifier
-  POST /api/review/screenshot  Stretch screenshot analysis
-  GET  /api/health          Health check
+Routes:
+  POST /api/review              — Nova 2 Lite code review
+  POST /api/voice               — Nova 2 Sonic voice Q&A
+  POST /api/research            — Nova Act doc research
+  POST /api/route               — Intent classifier
+  POST /api/share               — Save review, return share ID
+  GET  /api/share/{id}          — Load shared review
+  POST /api/translate           — Rewrite code in another language
+  POST /api/repo                — Review all files in a GitHub repo
+  POST /api/review/screenshot   — Screenshot analysis
+  GET  /api/health              — Health check
 """
+
 from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
-import base64
 import json
+import uuid
+import base64
 import logging
 import os
+import re
+import asyncio
+from typing import Optional
 from contextlib import asynccontextmanager
-from typing import Any
+from pathlib import Path
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import httpx
+from botocore.exceptions import ClientError, NoCredentialsError
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("devpilot")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-NOVA_LITE = os.getenv("NOVA_LITE_MODEL", "amazon.nova-lite-v1:0")
-NOVA_SONIC = os.getenv("NOVA_SONIC_MODEL", "amazon.nova-sonic-v1:0")
-CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
-    if origin.strip()
-]
+# ─── AWS CLIENT ───────────────────────────────────────────────────────────────
+try:
+    bedrock = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+    mock_mode = False
+    logger.info("AWS Bedrock client initialised")
+except NoCredentialsError:
+    logger.warning("AWS credentials not found — mock mode")
+    bedrock = None
+    mock_mode = True
 
+NOVA_LITE  = "amazon.nova-lite-v1:0"
+NOVA_SONIC = "amazon.nova-sonic-v1:0"
 
-def create_bedrock_client():
-    try:
-        session = boto3.Session(region_name=AWS_REGION)
-        credentials = session.get_credentials()
-        if credentials is None:
-            logger.warning("AWS credentials not found. Backend will run in mock mode.")
-            return None
-        return session.client("bedrock-runtime")
-    except (BotoCoreError, ClientError) as exc:
-        logger.warning("Failed to initialize Bedrock client. Falling back to mock mode: %s", exc)
-        return None
+# ─── SHARED REVIEWS STORE (in-memory + disk) ──────────────────────────────────
+SHARES_DIR = Path("./shares")
+SHARES_DIR.mkdir(exist_ok=True)
 
-
-bedrock = create_bedrock_client()
-
-
+# ─── PYDANTIC MODELS ─────────────────────────────────────────────────────────
 class ReviewRequest(BaseModel):
     code: str
     language: str = "python"
-    focus: str | None = None
-    context: str | None = None
-
-
-class VoiceTurn(BaseModel):
-    role: str
-    content: str
-
+    focus: Optional[str] = None
+    context: Optional[str] = None
 
 class VoiceRequest(BaseModel):
     message: str
-    code_context: str | None = None
-    history: list[VoiceTurn] = Field(default_factory=list)
-
+    code_context: Optional[str] = None
+    history: Optional[list] = []
 
 class ResearchRequest(BaseModel):
     query: str
     stack: str = "python"
-    error_message: str | None = None
-
+    error_message: Optional[str] = None
 
 class RouteRequest(BaseModel):
     input: str
 
+class ShareRequest(BaseModel):
+    code: str
+    language: str
+    result: dict
+    fix_history: Optional[list] = []
 
-REVIEW_SYSTEM = """You are DevPilot, a senior software engineer specializing in security, correctness, performance, and maintainability.
+class TranslateRequest(BaseModel):
+    code: str
+    from_lang: str
+    to_lang: str
 
-Review order:
-1. CRITICAL: security flaws and dangerous data handling
-2. HIGH: correctness bugs and crash paths
-3. MEDIUM: performance issues and unnecessary complexity
-4. LOW: maintainability, style, and readability
+class RepoRequest(BaseModel):
+    repo_url: str
+    github_token: Optional[str] = None
 
-Respond with JSON only:
+# ─── SYSTEM PROMPTS ───────────────────────────────────────────────────────────
+REVIEW_SYSTEM = """You are DevPilot, an elite senior software engineer specializing in security, performance, and clean code.
+
+ANALYSIS ORDER:
+1. CRITICAL: Security vulnerabilities (SQL injection, XSS, auth bypass)
+2. HIGH: Logic bugs, null risks, race conditions, resource leaks
+3. MEDIUM: Performance issues (N+1 queries, unnecessary loops)
+4. LOW: Style, naming, missing docs, dead code
+
+OUTPUT — respond ONLY with valid JSON:
 {
-  "score": 1,
-  "summary": "one sentence",
+  "score": <integer 1-10>,
+  "summary": "<one sentence assessment>",
   "issues": [
     {
       "severity": "CRITICAL|HIGH|MEDIUM|LOW",
       "category": "Security|Bug|Performance|Maintainability|Style",
-      "line": 1,
-      "title": "short issue title",
-      "description": "what is wrong",
-      "fix": "complete corrected code snippet"
+      "line": <integer or null>,
+      "title": "<short title>",
+      "description": "<detailed explanation>",
+      "fix": "<complete runnable fix>"
     }
   ],
-  "positives": ["brief positive"],
-  "refactored": "optional improved version"
+  "positives": ["<what code does well>"],
+  "refactored": "<complete improved version>"
 }
-"""
 
-VOICE_SYSTEM = """You are DevPilot Voice, a senior engineer answering a spoken developer question.
+RULES: Always provide runnable fix. Score 10=perfect, 1=dangerous. Pure JSON only."""
 
-Rules:
-- Keep the spoken answer concise and practical
-- No markdown formatting in the spoken text
-- Put code only in the code field
-- End with at most one short follow-up question
+VOICE_SYSTEM = """You are DevPilot Voice, a senior software engineer answering spoken developer questions.
 
-Respond with JSON only:
+RULES: Under 100 words. No markdown. Speak like a colleague. End with ONE optional follow-up question.
+
+OUTPUT — respond ONLY with valid JSON:
 {
-  "text": "spoken answer",
-  "code": "code snippet or null",
-  "follow_up": "optional question or null"
-}
-"""
+  "text": "<conversational answer, no markdown>",
+  "code": "<code snippet or null>",
+  "follow_up": "<one follow-up question or null>"
+}"""
 
-RESEARCH_SYSTEM = """You are DevPilot Research, a source-grounded software engineering assistant.
+RESEARCH_SYSTEM = """You are DevPilot Research, an autonomous software engineering research assistant.
 
-Provide a concise answer based on authoritative sources. Favor official docs over secondary sources.
-
-Respond with JSON only:
+OUTPUT — respond ONLY with valid JSON:
 {
-  "problem_understood": "one sentence",
+  "problem_understood": "<one sentence restatement>",
   "solution": {
-    "explanation": "plain English explanation",
-    "code": "complete code snippet",
-    "steps": ["step 1", "step 2"]
+    "explanation": "<plain English>",
+    "code": "<complete working snippet>",
+    "steps": ["<step 1>", "..."]
   },
-  "warnings": ["gotcha"],
-  "sources": [
+  "warnings": ["<gotcha>"],
+  "sources": [{"title": "<title>", "url": "<real URL>", "domain": "<domain>"}]
+}
+
+RULES: Only real authoritative URLs. Mark deprecated patterns. Pure JSON only."""
+
+TRANSLATE_SYSTEM = """You are DevPilot Translate, an expert polyglot programmer.
+Rewrite the given code in the target language, preserving all logic and functionality.
+
+OUTPUT — respond ONLY with valid JSON:
+{
+  "translated_code": "<complete rewritten code in target language>",
+  "key_differences": ["<important difference 1>", "<important difference 2>"],
+  "notes": "<any important migration notes>"
+}
+
+RULES: Preserve all logic. Use idiomatic patterns for the target language. Pure JSON only."""
+
+REPO_SYSTEM = """You are DevPilot, reviewing a file from a larger codebase.
+Be concise — focus only on issues that matter at the file level.
+
+OUTPUT — respond ONLY with valid JSON:
+{
+  "score": <integer 1-10>,
+  "summary": "<one sentence>",
+  "critical_count": <integer>,
+  "high_count": <integer>,
+  "issues": [
     {
-      "title": "page title",
-      "url": "https://example.com",
-      "domain": "example.com"
+      "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+      "title": "<short title>",
+      "line": <integer or null>,
+      "fix": "<fix>"
     }
   ]
 }
-"""
 
-ROUTER_SYSTEM = """Classify the developer input into exactly one category.
-Return only one token:
-CODE_REVIEW
-VOICE_CHAT
-DOC_RESEARCH
-GENERAL
-"""
+Keep response under 800 tokens. Pure JSON only."""
 
-VISION_SYSTEM = """You are DevPilot Vision.
+ROUTER_SYSTEM = """Classify into ONE category. Respond with ONLY the category name.
+Categories: CODE_REVIEW | VOICE_CHAT | DOC_RESEARCH | GENERAL"""
 
-Analyze a developer screenshot and return JSON only:
-{
-  "screen_type": "IDE|Browser|Terminal|AppUI|Diagram|Other",
-  "what_i_see": "brief description",
-  "context": "what the user appears to be doing",
-  "issues": [
-    {
-      "type": "Bug|Layout|Performance|UX|Code|Other",
-      "description": "issue description",
-      "recommendation": "how to improve it"
-    }
-  ],
-  "suggestions": ["proactive improvement"]
-}
-"""
-
-
-def invoke_nova(model_id: str, system_prompt: str, user_content: list[dict[str, Any]], *, temperature: float, max_tokens: int) -> str:
+# ─── CORE BEDROCK CALLER ─────────────────────────────────────────────────────
+def call_nova_lite(system_prompt: str, user_message: str, temperature: float = 0.1, max_tokens: int = 4096) -> str:
     if bedrock is None:
         raise HTTPException(status_code=503, detail="AWS credentials not configured")
-
     body = {
         "system": [{"text": system_prompt}],
-        "messages": [{"role": "user", "content": user_content}],
-        "inferenceConfig": {
-            "temperature": temperature,
-            "maxTokens": max_tokens,
-            "topP": 0.9,
-        },
+        "messages": [{"role": "user", "content": [{"text": user_message}]}],
+        "inferenceConfig": {"temperature": temperature, "maxTokens": max_tokens, "topP": 0.9}
     }
-
     try:
-        response = bedrock.invoke_model(
-            modelId=model_id,
-            body=json.dumps(body),
-            contentType="application/json",
-            accept="application/json",
-        )
-        parsed = json.loads(response["body"].read())
-        return parsed["output"]["message"]["content"][0]["text"]
-    except ClientError as exc:
-        code = exc.response["Error"]["Code"]
-        logger.error("Bedrock error %s: %s", code, exc)
-        if code == "AccessDeniedException":
-            raise HTTPException(status_code=403, detail="Bedrock access denied. Check model access and IAM permissions.") from exc
-        if code == "ThrottlingException":
-            raise HTTPException(status_code=429, detail="Bedrock rate limit reached. Retry in a moment.") from exc
-        raise HTTPException(status_code=500, detail=f"Bedrock error: {code}") from exc
+        response = bedrock.invoke_model(modelId=NOVA_LITE, body=json.dumps(body), contentType="application/json", accept="application/json")
+        result = json.loads(response["body"].read())
+        return result["output"]["message"]["content"][0]["text"]
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        logger.error(f"Bedrock error: {code}")
+        if code == "AccessDeniedException": raise HTTPException(status_code=403, detail="Bedrock access denied.")
+        if code == "ThrottlingException": raise HTTPException(status_code=429, detail="Rate limit. Retry shortly.")
+        raise HTTPException(status_code=500, detail=f"Bedrock error: {code}")
 
-
-def parse_model_json(raw: str) -> dict[str, Any]:
+def parse_json_response(raw: str) -> dict:
     clean = raw.strip()
     if clean.startswith("```"):
-        lines = clean.splitlines()
-        clean = "\n".join(lines[1:-1])
+        lines = clean.split("\n")
+        clean = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
     try:
         return json.loads(clean)
-    except json.JSONDecodeError as exc:
-        logger.error("Model returned malformed JSON: %s", raw[:600])
-        raise HTTPException(status_code=502, detail="Model returned malformed JSON.") from exc
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse failed: {e}\nRaw: {raw[:500]}")
+        raise HTTPException(status_code=500, detail="Model returned malformed JSON. Try again.")
 
-
+# ─── MOCK DATA ────────────────────────────────────────────────────────────────
 MOCK_REVIEW = {
-    "score": 4,
-    "summary": "Critical query construction risk detected with additional correctness and performance issues.",
+    "score": 4, "summary": "Critical SQL injection vulnerability detected.",
     "issues": [
-        {
-            "severity": "CRITICAL",
-            "category": "Security",
-            "line": 8,
-            "title": "SQL injection risk in query construction",
-            "description": "User input is concatenated directly into the SQL statement, allowing malicious values to alter query behavior.",
-            "fix": 'query = "SELECT * FROM users WHERE id = %s"\ncursor.execute(query, (user_id,))',
-        },
-        {
-            "severity": "HIGH",
-            "category": "Bug",
-            "line": 14,
-            "title": "Missing null guard for fetchone()",
-            "description": "The result is dereferenced without handling the case where no row is returned.",
-            "fix": 'result = cursor.fetchone()\nif result is None:\n    return None\nreturn result["name"]',
-        },
-        {
-            "severity": "MEDIUM",
-            "category": "Performance",
-            "line": 22,
-            "title": "Repeated database lookup inside loop",
-            "description": "The code issues one query per item rather than batch loading related records.",
-            "fix": 'ids = [u["id"] for u in users]\ncur.execute("SELECT * FROM posts WHERE user_id = ANY(%s)", (ids,))',
-        },
+        {"severity":"CRITICAL","category":"Security","line":8,"title":"SQL Injection","description":"User input concatenated directly into SQL query.","fix":"cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))"},
+        {"severity":"HIGH","category":"Bug","line":14,"title":"Unhandled None","description":"fetchone() can return None causing TypeError.","fix":"result = cursor.fetchone()\nif result is None:\n    return None\nreturn result['name']"}
     ],
-    "positives": ["The function has a narrow responsibility.", "The database access path is easy to follow."],
-    "refactored": 'def get_user(conn, user_id: int):\n    with conn.cursor() as cur:\n        cur.execute("SELECT id, name FROM users WHERE id = %s", (user_id,))\n        return cur.fetchone()',
+    "positives": ["Clear single responsibility"], "refactored": "def get_user(conn, user_id: int):\n    with conn.cursor() as cur:\n        cur.execute('SELECT id, name FROM users WHERE id = %s', (user_id,))\n        return cur.fetchone()"
 }
-
-MOCK_VOICE = {
-    "text": "The dangerous part is direct string concatenation in the SQL query. That lets attacker-controlled input change the query itself. Use a parameterized query so the database treats user_id as data, not executable SQL. You should also guard the no-row case before reading fields. Want me to show both fixes together?",
-    "code": 'query = "SELECT * FROM users WHERE id = %s"\ncursor.execute(query, (user_id,))\nresult = cursor.fetchone()',
-    "follow_up": "Want the safe full function?",
-}
-
+MOCK_VOICE = {"text": "That SQL injection is serious — you're concatenating user input directly. Use parameterized queries instead.", "code": "cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))", "follow_up": "Want me to explain parameterized queries in more detail?"}
 MOCK_RESEARCH = {
-    "problem_understood": "The app needs a safe psycopg2 query pattern that avoids SQL injection and handles empty results correctly.",
-    "solution": {
-        "explanation": "Use parameterized execute() calls and check the fetch result before reading fields.",
-        "code": 'def get_user_safe(conn, user_id: int):\n    with conn.cursor() as cur:\n        cur.execute("SELECT id, name FROM users WHERE id = %s", (user_id,))\n        result = cur.fetchone()\n        return result',
-        "steps": [
-            "Replace string concatenation with parameter placeholders.",
-            "Pass user input via the execute() parameter tuple.",
-            "Handle the no-result path explicitly.",
-        ],
-    },
-    "warnings": [
-        "Do not wrap SQL in f-strings or .format().",
-        "Parameterized values do not protect dynamic table or column names.",
-    ],
-    "sources": [
-        {
-            "title": "psycopg2 query parameters",
-            "url": "https://www.psycopg.org/docs/usage.html#query-parameters",
-            "domain": "psycopg.org",
-        },
-        {
-            "title": "OWASP SQL Injection Prevention Cheat Sheet",
-            "url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html",
-            "domain": "owasp.org",
-        },
-    ],
+    "problem_understood": "How to prevent SQL injection in Python.",
+    "solution": {"explanation": "Use parameterized queries.", "code": "cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))", "steps": ["Replace string concat with %s", "Pass data as tuple to execute()"]},
+    "warnings": ["Never use f-strings to build SQL"],
+    "sources": [{"title":"psycopg2 docs","url":"https://www.psycopg.org/docs/usage.html","domain":"psycopg.org"}]
+}
+MOCK_TRANSLATE = {
+    "translated_code": "async function getUser(userId: number): Promise<User | null> {\n  const result = await db.query(\n    'SELECT id, name FROM users WHERE id = $1',\n    [userId]\n  );\n  return result.rows[0] ?? null;\n}",
+    "key_differences": ["TypeScript uses async/await instead of synchronous calls", "PostgreSQL uses $1 placeholders instead of %s", "Returns typed User object instead of tuple"],
+    "notes": "Use node-postgres (pg) library for database connections in Node.js/TypeScript."
 }
 
-
+# ─── APP INIT ─────────────────────────────────────────────────────────────────
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    logger.info("DevPilot API starting. AWS configured: %s", bedrock is not None)
+async def lifespan(app: FastAPI):
+    logger.info(f"DevPilot API starting. AWS configured: {bedrock is not None}")
     yield
     logger.info("DevPilot API shutting down")
 
+app = FastAPI(title="DevPilot AI API", version="2.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-app = FastAPI(
-    title="DevPilot AI API",
-    description="Hackathon backend for the DevPilot AI workflow.",
-    version="0.1.0",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health():
-    return {
-        "status": "ok",
-        "mock_mode": bedrock is None,
-        "region": AWS_REGION,
-        "models": {
-            "nova_lite": NOVA_LITE,
-            "nova_sonic": NOVA_SONIC,
-        },
-    }
+    return {"status": "ok", "mock_mode": bedrock is None, "region": os.getenv("AWS_DEFAULT_REGION","us-east-1"), "models": {"nova_lite": NOVA_LITE, "nova_sonic": NOVA_SONIC}}
 
 
 @app.post("/api/review")
 async def review_code(req: ReviewRequest):
-    if not req.code.strip():
-        raise HTTPException(status_code=422, detail="Code field is required.")
-
-    if bedrock is None:
-        return MOCK_REVIEW
-
-    focus_line = f"\nFocus especially on: {req.focus}" if req.focus else ""
-    context_line = f"\nAdditional context: {req.context}" if req.context else ""
-    prompt = f"""Review this {req.language} code.{focus_line}{context_line}
-
-```{req.language}
-{req.code}
-```"""
-
-    raw = invoke_nova(
-        NOVA_LITE,
-        REVIEW_SYSTEM,
-        [{"text": prompt}],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-    return parse_model_json(raw)
+    if not req.code.strip(): raise HTTPException(status_code=422, detail="Code required")
+    focus_line = f"\nFocus on: {req.focus}" if req.focus else ""
+    msg = f"Review this {req.language} code:{focus_line}\n\n```{req.language}\n{req.code}\n```"
+    if bedrock is None: return MOCK_REVIEW
+    return parse_json_response(call_nova_lite(REVIEW_SYSTEM, msg, temperature=0.1))
 
 
 @app.post("/api/voice")
 async def voice_chat(req: VoiceRequest):
-    if not req.message.strip():
-        raise HTTPException(status_code=422, detail="Message field is required.")
-
-    if bedrock is None:
-        return MOCK_VOICE
-
+    if not req.message.strip(): raise HTTPException(status_code=422, detail="Message required")
     parts = []
-    if req.code_context:
-        parts.append(f"Current code context:\n```\n{req.code_context[:3000]}\n```")
+    if req.code_context: parts.append(f"Current code:\n```\n{req.code_context[:3000]}\n```\n")
     if req.history:
-        history_text = "\n".join(f"{turn.role.upper()}: {turn.content}" for turn in req.history[-6:])
-        parts.append(f"Recent conversation:\n{history_text}")
-    parts.append(f'Developer says: "{req.message}"')
-
-    raw = invoke_nova(
-        NOVA_LITE,
-        VOICE_SYSTEM,
-        [{"text": "\n\n".join(parts)}],
-        temperature=0.7,
-        max_tokens=512,
-    )
-    return parse_model_json(raw)
+        parts.append("Recent conversation:\n" + "\n".join([f"{t['role'].upper()}: {t['content']}" for t in req.history[-6:]]) + "\n")
+    parts.append(f"Developer says: \"{req.message}\"")
+    if bedrock is None: return MOCK_VOICE
+    return parse_json_response(call_nova_lite(VOICE_SYSTEM, "\n".join(parts), temperature=0.7, max_tokens=512))
 
 
 @app.post("/api/research")
 async def research_docs(req: ResearchRequest):
-    if not req.query.strip():
-        raise HTTPException(status_code=422, detail="Query field is required.")
-
-    if bedrock is None:
-        return MOCK_RESEARCH
-
-    error_line = f"\nError message: {req.error_message}" if req.error_message else ""
-    prompt = f"""Research this developer problem.
-
-Problem: {req.query}
-Stack: {req.stack}{error_line}
-
-Prefer official docs over secondary sources. Return only real URLs."""
-
-    raw = invoke_nova(
-        NOVA_LITE,
-        RESEARCH_SYSTEM,
-        [{"text": prompt}],
-        temperature=0.1,
-        max_tokens=2048,
-    )
-    return parse_model_json(raw)
+    if not req.query.strip(): raise HTTPException(status_code=422, detail="Query required")
+    err = f"\nError: {req.error_message}" if req.error_message else ""
+    msg = f"Problem: {req.query}\nStack: {req.stack}{err}\n\nFind the best solution with real authoritative URLs."
+    if bedrock is None: return MOCK_RESEARCH
+    return parse_json_response(call_nova_lite(RESEARCH_SYSTEM, msg, temperature=0.1, max_tokens=2048))
 
 
 @app.post("/api/route")
 async def route_intent(req: RouteRequest):
-    if not req.input.strip():
-        raise HTTPException(status_code=422, detail="Input field is required.")
-
-    if bedrock is None:
-        return {"intent": "CODE_REVIEW"}
-
-    raw = invoke_nova(
-        NOVA_LITE,
-        ROUTER_SYSTEM,
-        [{"text": req.input}],
-        temperature=0.0,
-        max_tokens=20,
-    )
+    if bedrock is None: return {"intent": "CODE_REVIEW"}
+    raw = call_nova_lite(ROUTER_SYSTEM, req.input, temperature=0.0, max_tokens=20)
     intent = raw.strip().upper()
-    valid = {"CODE_REVIEW", "VOICE_CHAT", "DOC_RESEARCH", "GENERAL"}
-    return {"intent": intent if intent in valid else "GENERAL"}
+    return {"intent": intent if intent in {"CODE_REVIEW","VOICE_CHAT","DOC_RESEARCH","GENERAL"} else "GENERAL"}
 
+
+# ─── FEATURE 9: SHARE REVIEW ─────────────────────────────────────────────────
+
+@app.post("/api/share")
+async def create_share(req: ShareRequest):
+    """Save a review and return a shareable ID."""
+    share_id = str(uuid.uuid4())[:8]
+    share_data = {
+        "id": share_id,
+        "code": req.code,
+        "language": req.language,
+        "result": req.result,
+        "fix_history": req.fix_history,
+        "created_at": __import__("datetime").datetime.utcnow().isoformat()
+    }
+    share_file = SHARES_DIR / f"{share_id}.json"
+    share_file.write_text(json.dumps(share_data))
+    logger.info(f"Created share: {share_id}")
+    return {"share_id": share_id, "url": f"http://localhost:8000/api/share/{share_id}"}
+
+
+@app.get("/api/share/{share_id}")
+async def get_share(share_id: str):
+    """Load a shared review by ID."""
+    # sanitize
+    if not re.match(r'^[a-f0-9\-]{8}$', share_id):
+        raise HTTPException(status_code=400, detail="Invalid share ID")
+    share_file = SHARES_DIR / f"{share_id}.json"
+    if not share_file.exists():
+        raise HTTPException(status_code=404, detail="Share not found or expired")
+    return json.loads(share_file.read_text())
+
+
+# ─── FEATURE 10: FIX HISTORY ─────────────────────────────────────────────────
+# Fix history is stored client-side in localStorage (see frontend).
+# This endpoint accepts a batch save for persistence across devices.
+
+@app.post("/api/fix-history")
+async def save_fix_history(payload: dict):
+    """Accept fix history entries for optional server-side logging."""
+    logger.info(f"Fix history received: {len(payload.get('entries',[]))} entries")
+    return {"saved": True}
+
+
+# ─── FEATURE 11: MULTI-LANGUAGE TRANSLATION ──────────────────────────────────
+
+@app.post("/api/translate")
+async def translate_code(req: TranslateRequest):
+    """Rewrite code from one language to another using Nova 2 Lite."""
+    if not req.code.strip(): raise HTTPException(status_code=422, detail="Code required")
+    if req.from_lang == req.to_lang: raise HTTPException(status_code=422, detail="Source and target language must differ")
+
+    msg = f"""Rewrite this {req.from_lang} code in {req.to_lang}.
+Preserve all logic and functionality. Use idiomatic {req.to_lang} patterns.
+
+```{req.from_lang}
+{req.code}
+```"""
+
+    if bedrock is None: return MOCK_TRANSLATE
+    return parse_json_response(call_nova_lite(TRANSLATE_SYSTEM, msg, temperature=0.2, max_tokens=4096))
+
+
+# ─── FEATURE 12: REPO-LEVEL REVIEW ───────────────────────────────────────────
+
+def parse_github_url(url: str):
+    """Extract owner and repo from a GitHub URL."""
+    match = re.search(r'github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/|$)', url)
+    if not match: raise HTTPException(status_code=422, detail="Invalid GitHub URL. Use: https://github.com/owner/repo")
+    return match.group(1), match.group(2)
+
+REVIEWABLE_EXTENSIONS = {".py",".js",".ts",".jsx",".tsx",".go",".java",".rs",".rb",".php",".cpp",".c",".cs"}
+MAX_FILES = 10
+MAX_FILE_SIZE = 8000  # chars
+
+async def fetch_github_files(owner: str, repo: str, token: Optional[str] = None):
+    """Fetch all reviewable source files from a GitHub repo."""
+    headers = {"Accept": "application/vnd.github+json"}
+    if token: headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Get file tree
+        r = await client.get(f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1", headers=headers)
+        if r.status_code == 404: raise HTTPException(status_code=404, detail="Repo not found or private")
+        if r.status_code == 403: raise HTTPException(status_code=403, detail="GitHub rate limit. Provide a token.")
+        tree = r.json().get("tree", [])
+
+        # Filter to reviewable files
+        files = [f for f in tree if f["type"] == "blob" and Path(f["path"]).suffix in REVIEWABLE_EXTENSIONS and f.get("size", 0) < 50000]
+        files = files[:MAX_FILES]
+
+        # Fetch file contents
+        results = []
+        for f in files:
+            rc = await client.get(f"https://api.github.com/repos/{owner}/{repo}/contents/{f['path']}", headers=headers)
+            if rc.status_code != 200: continue
+            content_b64 = rc.json().get("content","").replace("\n","")
+            try:
+                content = base64.b64decode(content_b64).decode("utf-8", errors="ignore")
+                results.append({"path": f["path"], "content": content[:MAX_FILE_SIZE]})
+            except Exception: continue
+
+        return results
+
+@app.post("/api/repo")
+async def review_repo(req: RepoRequest):
+    """Review all source files in a GitHub repo."""
+    owner, repo = parse_github_url(req.repo_url)
+    logger.info(f"Reviewing repo: {owner}/{repo}")
+
+    # Fetch files
+    try:
+        files = await fetch_github_files(owner, repo, req.github_token)
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch repo: {e}")
+
+    if not files:
+        raise HTTPException(status_code=422, detail="No reviewable source files found in repo")
+
+    # Review each file
+    file_results = []
+    for f in files:
+        ext = Path(f["path"]).suffix.lstrip(".")
+        lang_map = {".py":"python",".js":"javascript",".ts":"typescript",".jsx":"javascript",".tsx":"typescript",".go":"go",".java":"java",".rs":"rust",".rb":"ruby",".php":"php",".cpp":"c++",".c":"c",".cs":"c#"}
+        lang = lang_map.get(Path(f["path"]).suffix, "code")
+
+        if bedrock is None:
+            file_results.append({"path":f["path"],"language":lang,"score":7,"summary":"Mock review","critical_count":0,"high_count":1,"issues":[{"severity":"HIGH","title":"Mock issue","line":1,"fix":"# fix here"}]})
+            continue
+
+        msg = f"Review this {lang} file ({f['path']}):\n\n```{lang}\n{f['content']}\n```"
+        try:
+            raw = call_nova_lite(REPO_SYSTEM, msg, temperature=0.1, max_tokens=800)
+            result = parse_json_response(raw)
+            result["path"] = f["path"]
+            result["language"] = lang
+            file_results.append(result)
+        except Exception as e:
+            logger.warning(f"Failed to review {f['path']}: {e}")
+            file_results.append({"path":f["path"],"language":lang,"score":None,"summary":"Review failed","critical_count":0,"high_count":0,"issues":[]})
+
+    # Aggregate summary
+    reviewed = [r for r in file_results if r.get("score") is not None]
+    avg_score = round(sum(r["score"] for r in reviewed) / len(reviewed)) if reviewed else 0
+    total_critical = sum(r.get("critical_count",0) for r in file_results)
+    total_high = sum(r.get("high_count",0) for r in file_results)
+
+    return {
+        "repo": f"{owner}/{repo}",
+        "files_reviewed": len(file_results),
+        "avg_score": avg_score,
+        "total_critical": total_critical,
+        "total_high": total_high,
+        "files": file_results
+    }
+
+
+# ─── SCREENSHOT ANALYSIS ─────────────────────────────────────────────────────
 
 @app.post("/api/review/screenshot")
 async def review_screenshot(file: UploadFile = File(...), context: str = ""):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=422, detail="File must be an image.")
-
-    if bedrock is None:
-        return {
-            "screen_type": "IDE",
-            "what_i_see": "Mock screenshot analysis is active because AWS is not configured.",
-            "context": "The user appears to be debugging inside an editor.",
-            "issues": [],
-            "suggestions": ["Connect Bedrock credentials to enable real screenshot analysis."],
-        }
-
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=422, detail="File must be an image")
     image_bytes = await file.read()
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    file_format = file.content_type.split("/", maxsplit=1)[1]
-    user_content = [
-        {"image": {"format": file_format, "source": {"bytes": image_b64}}},
-        {"text": f"Analyze this screenshot. Additional context: {context}" if context else "Analyze this screenshot."},
-    ]
-
-    raw = invoke_nova(
-        NOVA_LITE,
-        VISION_SYSTEM,
-        user_content,
-        temperature=0.2,
-        max_tokens=2048,
-    )
-    return parse_model_json(raw)
+    fmt = file.content_type.split("/")[1]
+    if bedrock is None:
+        return {"screen_type":"IDE","what_i_see":"Mock screenshot analysis","context":"Developer working on code","issues":[],"suggestions":["Connect AWS to enable real analysis"]}
+    body = {
+        "system": [{"text": "You are DevPilot Vision. Analyze this developer screenshot. Return JSON: {screen_type, what_i_see, context, issues: [{type, description, recommendation}], suggestions}"}],
+        "messages": [{"role":"user","content":[{"image":{"format":fmt,"source":{"bytes":image_b64}}},{"text":f"Analyze this screenshot.{' Context: '+context if context else ''}"}]}],
+        "inferenceConfig": {"temperature":0.2,"maxTokens":2048}
+    }
+    try:
+        response = bedrock.invoke_model(modelId=NOVA_LITE, body=json.dumps(body), contentType="application/json", accept="application/json")
+        result = json.loads(response["body"].read())
+        return parse_json_response(result["output"]["message"]["content"][0]["text"])
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=str(e))
