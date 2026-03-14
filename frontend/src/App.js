@@ -981,7 +981,7 @@ export default function App() {
       <style>{CSS}</style>
       <div className="app">
         <header className="topbar">
-          <div className="logo"><div className="logo-dot"/>devpilot</div>
+          <div className="logo"><div className="logo-dot"/>DevPilot</div>
           <span className="topbar-badge">AI</span>
           {apiStatus==="mock"&&<div className="warn-banner" style={{padding:"4px 10px",fontSize:11,marginLeft:8}}>⚡ Mock mode — add AWS credentials to .env</div>}
           {apiStatus==="error"&&<div className="error-banner" style={{padding:"4px 10px",fontSize:11,marginLeft:8}}>✗ Backend offline</div>}
