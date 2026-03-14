@@ -402,14 +402,13 @@ function VoicePanel({ context }) {
   // Simulate mic toggle (real Nova 2 Sonic needs WebSocket streaming)
 const toggleMic = () => {
   if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-    alert("Speech recognition not supported in this browser. Use Chrome.");
+    alert("Use Chrome browser for voice input.");
     return;
   }
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const recognition = new SpeechRecognition();
   recognition.lang = 'en-US';
   recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
   setRecording(true);
   recognition.start();
   recognition.onresult = (event) => {
