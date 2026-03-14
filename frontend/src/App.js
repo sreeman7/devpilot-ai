@@ -364,6 +364,7 @@ function VoicePanel({ context }) {
   const [recording, setRecording] = useState(false);
   const [loading, setLoading]   = useState(false);
   const scrollRef = useRef(null);
+  const recognitionRef = useRef(null);
 
   // History for multi-turn context (last 6 turns)
   const historyRef = useRef([]);
@@ -371,6 +372,12 @@ function VoicePanel({ context }) {
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages]);
+
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop?.();
+    };
+  }, []);
 
   const sendMessage = async (text) => {
     if (!text.trim() || loading) return;
@@ -399,26 +406,65 @@ function VoicePanel({ context }) {
     }
   };
 
-  // Simulate mic toggle (real Nova 2 Sonic needs WebSocket streaming)
-const toggleMic = () => {
-  if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-    alert("Use Chrome browser for voice input.");
-    return;
-  }
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const recognition = new SpeechRecognition();
-  recognition.lang = 'en-US';
-  recognition.interimResults = false;
-  setRecording(true);
-  recognition.start();
-  recognition.onresult = (event) => {
-    const transcript = event.results[0][0].transcript;
-    setRecording(false);
-    sendMessage(transcript);
+  const toggleMic = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (recording) {
+      recognitionRef.current?.stop?.();
+      setRecording(false);
+      return;
+    }
+
+    if (!SpeechRecognition) {
+      setMessages(m => [
+        ...m,
+        {
+          id: Date.now(),
+          role:"bot",
+          text:"Voice input is not supported in this browser. Type your question instead or use Chrome.",
+          code:null,
+          followUp:null,
+        }
+      ]);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => setRecording(true);
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map(result => result[0]?.transcript || "")
+        .join("")
+        .trim();
+      setInput(transcript);
+    };
+    recognition.onerror = (event) => {
+      if (event.error !== "aborted") {
+        setMessages(m => [
+          ...m,
+          {
+            id: Date.now(),
+            role:"bot",
+            text:`Voice input failed: ${event.error}. Check microphone permission and try again.`,
+            code:null,
+            followUp:null,
+          }
+        ]);
+      }
+      setRecording(false);
+    };
+    recognition.onend = () => {
+      setRecording(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.start();
   };
-  recognition.onerror = () => setRecording(false);
-  recognition.onend = () => setRecording(false);
-};
 
   return (
     <div className="voice-layout">
