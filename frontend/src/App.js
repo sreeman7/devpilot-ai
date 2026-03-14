@@ -104,14 +104,14 @@ const CSS = `
   /* ISSUE CARDS */
   .issue-card { border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg2); overflow: hidden; transition: border-color 0.15s; }
   .issue-card:hover { border-color: var(--border2); }
-  .issue-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; }
-  .severity-badge { font-family: var(--mono); font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; flex-shrink: 0; }
+  .issue-header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; min-height: 46px; cursor: pointer; }
+  .severity-badge { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 10px; font-weight: 600; line-height: 1.2; min-height: 24px; padding: 3px 9px; border-radius: 4px; flex-shrink: 0; }
   .sev-critical { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
   .sev-high     { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
   .sev-medium   { background: rgba(96,165,250,0.15); color: #93c5fd; border: 1px solid rgba(96,165,250,0.25); }
   .sev-low      { background: rgba(139,145,160,0.12); color: #8b91a0; border: 1px solid rgba(139,145,160,0.2); }
-  .issue-title { font-size: 13px; font-weight: 500; color: var(--text); flex: 1; }
-  .issue-line { font-family: var(--mono); font-size: 11px; color: var(--text3); }
+  .issue-title { font-size: 13px; font-weight: 500; line-height: 1.4; color: var(--text); flex: 1; }
+  .issue-line { font-family: var(--mono); font-size: 11px; line-height: 1.2; color: var(--text3); }
   .issue-body { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 8px; }
   .issue-desc { font-size: 12px; color: var(--text2); line-height: 1.6; }
   .issue-fix { background: var(--bg); border-radius: 6px; border: 1px solid var(--border); overflow: hidden; }
