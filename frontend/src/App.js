@@ -633,7 +633,7 @@ export default function App() {
   // Health check on mount
   useEffect(() => {
     api.get("/api/health")
-      .then(data => setApiStatus(data.aws_configured ? "ok" : "mock"))
+      .then(data => setApiStatus(!data.mock_mode ? "ok" : "mock"))
       .catch(() => setApiStatus("error"));
   }, []);
 
