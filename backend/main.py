@@ -22,6 +22,7 @@ load_dotenv()
 import json
 import uuid
 import base64
+import ast
 import logging
 import os
 import re
@@ -52,6 +53,7 @@ except NoCredentialsError:
 
 NOVA_LITE  = "amazon.nova-lite-v1:0"
 NOVA_SONIC = "amazon.nova-sonic-v1:0"
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
 
 # ─── SHARED REVIEWS STORE (in-memory + disk) ──────────────────────────────────
 SHARES_DIR = Path("./shares")
@@ -119,7 +121,12 @@ OUTPUT — respond ONLY with valid JSON:
   "refactored": "<complete improved version>"
 }
 
-RULES: Always provide runnable fix. Score 10=perfect, 1=dangerous. Pure JSON only."""
+RULES:
+- Always provide a real runnable CODE fix in the "fix" field — never say "use X approach" or describe what to do.
+- If the fix requires explanation, put the explanation in "description" and put only code in "fix".
+- The "fix" field must always start with actual code syntax, never plain English sentences.
+- Score 10=perfect, 1=dangerous.
+- Pure JSON only."""
 
 VOICE_SYSTEM = """You are DevPilot Voice, a senior software engineer answering spoken developer questions.
 
@@ -205,15 +212,114 @@ def call_nova_lite(system_prompt: str, user_message: str, temperature: float = 0
         raise HTTPException(status_code=500, detail=f"Bedrock error: {code}")
 
 def parse_json_response(raw: str) -> dict:
-    clean = raw.strip()
-    if clean.startswith("```"):
-        lines = clean.split("\n")
-        clean = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    def strip_fences(text: str) -> str:
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        return text.strip()
+
+    def extract_balanced_object(text: str) -> str:
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("No JSON object start found")
+
+        depth = 0
+        in_string = False
+        escape = False
+        quote_char = ""
+
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote_char:
+                    in_string = False
+            else:
+                if char in {'"', "'"}:
+                    in_string = True
+                    quote_char = char
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:index + 1]
+
+        raise ValueError("No balanced JSON object found")
+
+    def normalize_text(text: str) -> str:
+        text = strip_fences(text)
+        text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", text)
+        return text.strip()
+
+    def try_json(text: str):
+        return json.loads(text)
+
+    def try_python_literal(text: str):
+        pythonish = re.sub(r"\btrue\b", "True", text, flags=re.IGNORECASE)
+        pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.IGNORECASE)
+        pythonish = re.sub(r"\bnull\b", "None", pythonish, flags=re.IGNORECASE)
+        value = ast.literal_eval(pythonish)
+        if isinstance(value, dict):
+            return value
+        raise ValueError("Parsed literal was not a dict")
+
+    clean = normalize_text(raw)
+
+    candidates = []
+    candidates.append(clean)
     try:
-        return json.loads(clean)
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parse failed: {e}\nRaw: {raw[:500]}")
-        raise HTTPException(status_code=500, detail="Model returned malformed JSON. Try again.")
+        candidates.append(extract_balanced_object(clean))
+    except ValueError:
+        pass
+
+    repaired_candidates = []
+    for candidate in candidates:
+        repaired_candidates.append(candidate)
+        repaired_candidates.append(re.sub(r",(\s*[}\]])", r"\1", candidate))
+
+    seen = set()
+    for candidate in repaired_candidates:
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return try_json(candidate)
+        except Exception:
+            pass
+        try:
+            return try_python_literal(candidate)
+        except Exception:
+            pass
+
+    logger.error("JSON parse failed after repairs.\nRaw: %s", raw[:1000])
+    raise HTTPException(status_code=500, detail="Model returned malformed JSON. Try again.")
+
+
+def call_nova_json(system_prompt: str, user_message: str, *, temperature: float = 0.1, max_tokens: int = 4096) -> dict:
+    raw = call_nova_lite(system_prompt, user_message, temperature=temperature, max_tokens=max_tokens)
+    try:
+        return parse_json_response(raw)
+    except HTTPException as exc:
+        if exc.status_code != 500 or "malformed JSON" not in str(exc.detail):
+            raise
+
+    logger.warning("Malformed JSON from model. Retrying once with stricter JSON instructions.")
+    retry_system = (
+        system_prompt
+        + "\n\nFINAL OUTPUT RULES:\n"
+        + "- Return exactly one valid JSON object.\n"
+        + "- Do not include markdown, backticks, comments, or explanatory text.\n"
+        + "- Ensure all strings are properly escaped and all keys use double quotes.\n"
+    )
+    retry_message = user_message + "\n\nReturn valid JSON only."
+    retry_raw = call_nova_lite(retry_system, retry_message, temperature=0.0, max_tokens=max_tokens)
+    return parse_json_response(retry_raw)
 
 # ─── MOCK DATA ────────────────────────────────────────────────────────────────
 MOCK_REVIEW = {
@@ -260,7 +366,7 @@ async def review_code(req: ReviewRequest):
     focus_line = f"\nFocus on: {req.focus}" if req.focus else ""
     msg = f"Review this {req.language} code:{focus_line}\n\n```{req.language}\n{req.code}\n```"
     if bedrock is None: return MOCK_REVIEW
-    return parse_json_response(call_nova_lite(REVIEW_SYSTEM, msg, temperature=0.1))
+    return call_nova_json(REVIEW_SYSTEM, msg, temperature=0.1)
 
 
 @app.post("/api/voice")
@@ -272,7 +378,7 @@ async def voice_chat(req: VoiceRequest):
         parts.append("Recent conversation:\n" + "\n".join([f"{t['role'].upper()}: {t['content']}" for t in req.history[-6:]]) + "\n")
     parts.append(f"Developer says: \"{req.message}\"")
     if bedrock is None: return MOCK_VOICE
-    return parse_json_response(call_nova_lite(VOICE_SYSTEM, "\n".join(parts), temperature=0.7, max_tokens=512))
+    return call_nova_json(VOICE_SYSTEM, "\n".join(parts), temperature=0.7, max_tokens=512)
 
 
 @app.post("/api/research")
@@ -281,7 +387,7 @@ async def research_docs(req: ResearchRequest):
     err = f"\nError: {req.error_message}" if req.error_message else ""
     msg = f"Problem: {req.query}\nStack: {req.stack}{err}\n\nFind the best solution with real authoritative URLs."
     if bedrock is None: return MOCK_RESEARCH
-    return parse_json_response(call_nova_lite(RESEARCH_SYSTEM, msg, temperature=0.1, max_tokens=2048))
+    return call_nova_json(RESEARCH_SYSTEM, msg, temperature=0.1, max_tokens=2048)
 
 
 @app.post("/api/route")
@@ -309,7 +415,11 @@ async def create_share(req: ShareRequest):
     share_file = SHARES_DIR / f"{share_id}.json"
     share_file.write_text(json.dumps(share_data))
     logger.info(f"Created share: {share_id}")
-    return {"share_id": share_id, "url": f"http://localhost:8000/api/share/{share_id}"}
+    return {
+        "share_id": share_id,
+        "url": f"{FRONTEND_BASE_URL}?share={share_id}",
+        "api_url": f"http://localhost:8000/api/share/{share_id}",
+    }
 
 
 @app.get("/api/share/{share_id}")
@@ -351,7 +461,7 @@ Preserve all logic and functionality. Use idiomatic {req.to_lang} patterns.
 ```"""
 
     if bedrock is None: return MOCK_TRANSLATE
-    return parse_json_response(call_nova_lite(TRANSLATE_SYSTEM, msg, temperature=0.2, max_tokens=4096))
+    return call_nova_json(TRANSLATE_SYSTEM, msg, temperature=0.2, max_tokens=4096)
 
 
 # ─── FEATURE 12: REPO-LEVEL REVIEW ───────────────────────────────────────────
@@ -424,8 +534,7 @@ async def review_repo(req: RepoRequest):
 
         msg = f"Review this {lang} file ({f['path']}):\n\n```{lang}\n{f['content']}\n```"
         try:
-            raw = call_nova_lite(REPO_SYSTEM, msg, temperature=0.1, max_tokens=800)
-            result = parse_json_response(raw)
+            result = call_nova_json(REPO_SYSTEM, msg, temperature=0.1, max_tokens=800)
             result["path"] = f["path"]
             result["language"] = lang
             file_results.append(result)
@@ -468,6 +577,18 @@ async def review_screenshot(file: UploadFile = File(...), context: str = ""):
     try:
         response = bedrock.invoke_model(modelId=NOVA_LITE, body=json.dumps(body), contentType="application/json", accept="application/json")
         result = json.loads(response["body"].read())
-        return parse_json_response(result["output"]["message"]["content"][0]["text"])
+        raw = result["output"]["message"]["content"][0]["text"]
+        try:
+            return parse_json_response(raw)
+        except HTTPException as exc:
+            if exc.status_code != 500 or "malformed JSON" not in str(exc.detail):
+                raise
+            logger.warning("Malformed JSON from vision response. Retrying once with stricter JSON instructions.")
+            body["system"] = [{
+                "text": "You are DevPilot Vision. Return exactly one valid JSON object with keys: screen_type, what_i_see, context, issues, suggestions. No markdown, no prose outside JSON."
+            }]
+            retry_response = bedrock.invoke_model(modelId=NOVA_LITE, body=json.dumps(body), contentType="application/json", accept="application/json")
+            retry_result = json.loads(retry_response["body"].read())
+            return parse_json_response(retry_result["output"]["message"]["content"][0]["text"])
     except ClientError as e:
         raise HTTPException(status_code=500, detail=str(e))

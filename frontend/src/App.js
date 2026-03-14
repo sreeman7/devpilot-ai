@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
+const APP_BASE = process.env.REACT_APP_APP_URL || window.location.origin;
 const api = {
   async post(path, body) {
     const res = await fetch(`${API_BASE}${path}`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
@@ -36,6 +37,10 @@ function loadSessions() { try { return JSON.parse(localStorage.getItem(SESSION_K
 function saveSessions(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s.slice(-20))); } catch {} }
 function loadFixHistory() { try { return JSON.parse(localStorage.getItem(FIX_HIST_KEY)||"[]"); } catch { return []; } }
 function saveFixHistory(h) { try { localStorage.setItem(FIX_HIST_KEY, JSON.stringify(h.slice(-100))); } catch {} }
+function buildShareUrl(shareId) { return `${APP_BASE}?share=${shareId}`; }
+function getShareIdFromLocation() {
+  try { return new URLSearchParams(window.location.search).get("share"); } catch { return null; }
+}
 const severityClass = s => ({CRITICAL:"sev-critical",HIGH:"sev-high",MEDIUM:"sev-medium",LOW:"sev-low"}[s]||"sev-low");
 const scoreColor = s => s >= 8 ? "#00d4aa" : s >= 5 ? "#f59e0b" : "#ef4444";
 const now = () => new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
@@ -96,7 +101,7 @@ const CSS = `
   .nav-badge{margin-left:auto;font-size:10px;font-family:var(--mono);background:var(--bg4);color:var(--text3);padding:1px 6px;border-radius:8px;}
   .nav-item.active .nav-badge{background:rgba(0,212,170,0.15);color:var(--accent);}
   .sidebar-footer{margin-top:auto;padding-top:12px;border-top:1px solid var(--border);}
-  .main{overflow:hidden;display:flex;flex-direction:column;}
+  .main{overflow:hidden;display:flex;flex-direction:column;min-height:0;}
   .panel-header{padding:18px 24px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-shrink:0;}
   .panel-title{font-size:15px;font-weight:600;color:var(--text);}
   .panel-sub{font-size:12px;color:var(--text3);margin-top:1px;}
@@ -109,14 +114,14 @@ const CSS = `
   .btn-success{background:var(--green-bg);color:var(--green);border-color:rgba(34,197,94,0.2);}
   .btn-purple{background:var(--purple-bg);color:var(--purple);border-color:rgba(167,139,250,0.2);}
   .btn-sm{padding:4px 10px;font-size:12px;}
-  .review-layout{display:grid;grid-template-columns:1fr 1fr;height:100%;overflow:hidden;}
-  .code-pane{display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;}
-  .results-pane{display:flex;flex-direction:column;overflow:hidden;}
+  .review-layout{display:grid;grid-template-columns:1fr 1fr;flex:1;overflow:hidden;min-height:0;}
+  .code-pane{display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;min-height:0;}
+  .results-pane{display:flex;flex-direction:column;overflow:hidden;min-height:0;}
   .pane-toolbar{display:flex;align-items:center;gap:8px;padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;}
-  .code-editor{flex:1;padding:16px;resize:none;outline:none;border:none;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.7;overflow-y:auto;}
+  .code-editor{flex:1;padding:16px;resize:none;outline:none;border:none;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.7;overflow-y:auto;min-height:0;}
   .code-editor::placeholder{color:var(--text3);}
-  .results-scroll{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;}
-  .issue-card{border-radius:var(--radius);border:1px solid var(--border);background:var(--bg2);overflow:hidden;transition:border-color 0.15s;}
+  .results-scroll{flex:1;overflow-y:auto;padding:16px 16px 28px;display:flex;flex-direction:column;gap:12px;min-height:0;scroll-padding-bottom:28px;}
+  .issue-card{border-radius:var(--radius);border:1px solid var(--border);background:var(--bg2);overflow:visible;transition:border-color 0.15s;}
   .issue-card:hover{border-color:var(--border2);}
   .issue-card.applied{border-color:rgba(34,197,94,0.3);background:rgba(34,197,94,0.04);}
   .issue-header{display:flex;align-items:center;gap:8px;padding:12px 14px;min-height:46px;cursor:pointer;}
@@ -127,22 +132,22 @@ const CSS = `
   .sev-low{background:rgba(139,145,160,0.12);color:#8b91a0;border:1px solid rgba(139,145,160,0.2);}
   .issue-title{font-size:13px;font-weight:500;line-height:1.4;color:var(--text);flex:1;}
   .issue-line{font-family:var(--mono);font-size:11px;line-height:1.2;color:var(--text3);}
-  .issue-body{padding:0 14px 12px;display:flex;flex-direction:column;gap:8px;}
+  .issue-body{padding:0 14px 16px;display:flex;flex-direction:column;gap:8px;overflow:visible;}
   .issue-desc{font-size:12px;color:var(--text2);line-height:1.6;}
-  .issue-fix{background:var(--bg);border-radius:6px;border:1px solid var(--border);overflow:hidden;}
+  .issue-fix{background:var(--bg);border-radius:6px;border:1px solid var(--border);overflow:visible;min-height:0;}
   .fix-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--bg2);}
   .fix-label{font-family:var(--mono);font-size:10px;color:var(--accent);letter-spacing:0.5px;}
   .fix-actions{display:flex;gap:4px;}
-  .fix-code{font-family:var(--mono);font-size:12px;color:#a8d8b0;padding:10px;line-height:1.6;white-space:pre-wrap;overflow-x:auto;}
+  .fix-code{font-family:var(--mono);font-size:12px;color:#a8d8b0;padding:10px;line-height:1.6;white-space:pre-wrap;overflow:auto;max-height:320px;}
   .confidence-bar{height:3px;border-radius:2px;margin-top:4px;transition:width 0.6s ease;}
   .confidence-label{font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:2px;}
   .score-card{border-radius:var(--radius);background:var(--bg2);border:1px solid var(--border);padding:14px 16px;display:flex;align-items:center;gap:14px;}
   .score-ring{width:52px;height:52px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:18px;font-weight:600;border:2px solid;}
   .score-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;}
   .score-summary{font-size:12px;color:var(--text2);line-height:1.6;}
-  .diff-view{display:grid;grid-template-columns:1fr 1fr;gap:0;border-radius:6px;border:1px solid var(--border);overflow:hidden;}
+  .diff-view{display:grid;grid-template-columns:1fr 1fr;gap:0;border-radius:6px;border:1px solid var(--border);overflow:hidden;min-height:0;}
   .diff-header{font-family:var(--mono);font-size:10px;padding:6px 10px;border-bottom:1px solid var(--border);letter-spacing:0.5px;}
-  .diff-code{font-family:var(--mono);font-size:12px;padding:10px;line-height:1.7;white-space:pre-wrap;}
+  .diff-code{font-family:var(--mono);font-size:12px;padding:10px;line-height:1.7;white-space:pre-wrap;overflow:auto;max-height:320px;}
   .diff-old{background:rgba(239,68,68,0.06);color:#fca5a5;}
   .diff-new{background:rgba(34,197,94,0.06);color:#a8d8b0;border-left:1px solid var(--border);}
   .filter-bar{display:flex;gap:6px;flex-wrap:wrap;}
@@ -154,8 +159,8 @@ const CSS = `
   .empty-icon{font-size:36px;opacity:0.4;}
   .empty-title{font-size:14px;font-weight:500;color:var(--text2);}
   .empty-sub{font-size:12px;line-height:1.6;max-width:260px;}
-  .voice-layout{display:flex;flex-direction:column;height:100%;overflow:hidden;}
-  .chat-scroll{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:14px;}
+  .voice-layout{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;}
+  .chat-scroll{flex:1;overflow-y:auto;padding:20px 24px 28px;display:flex;flex-direction:column;gap:14px;scroll-padding-bottom:28px;}
   .msg{display:flex;gap:10px;animation:fadeUp 0.2s ease;}
   @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
   .msg-avatar{width:28px;height:28px;border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:2px;}
@@ -176,26 +181,26 @@ const CSS = `
   .mic-btn.recording{background:var(--red-bg);border-color:rgba(239,68,68,0.4);animation:micPulse 1s ease-in-out infinite;}
   @keyframes micPulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.3)}50%{box-shadow:0 0 0 6px rgba(239,68,68,0)}}
   .voice-hint{font-size:11px;color:var(--text3);text-align:center;}
-  .research-layout{display:flex;flex-direction:column;height:100%;overflow:hidden;}
+  .research-layout{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;}
   .research-input-zone{padding:20px 24px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:10px;flex-shrink:0;}
   .research-input{background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:var(--radius);padding:10px 14px;font-family:var(--sans);font-size:13px;outline:none;resize:none;line-height:1.6;min-height:72px;transition:border-color 0.15s;width:100%;}
   .research-input:focus{border-color:var(--accent);}
   .research-input::placeholder{color:var(--text3);}
   .research-row{display:flex;gap:8px;align-items:center;}
   .stack-select{flex:1;background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:var(--radius);padding:7px 12px;font-family:var(--sans);font-size:13px;outline:none;}
-  .research-scroll{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:14px;}
-  .research-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;}
+  .research-scroll{flex:1;overflow-y:auto;padding:20px 24px 28px;display:flex;flex-direction:column;gap:14px;scroll-padding-bottom:28px;}
+  .research-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:visible;}
   .research-card-header{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;}
   .research-card-title{font-size:13px;font-weight:600;color:var(--text);}
-  .research-card-body{padding:14px 16px;}
+  .research-card-body{padding:14px 16px 18px;overflow:visible;overflow-wrap:anywhere;}
   .research-step{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);line-height:1.6;}
   .research-step:last-child{border-bottom:none;}
   .step-num{width:20px;height:20px;border-radius:50%;background:var(--accent-bg);color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;}
   .source-link{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);margin-top:8px;font-size:12px;color:var(--blue);cursor:pointer;transition:background 0.15s;text-decoration:none;}
   .source-link:hover{background:var(--bg3);}
   .source-domain{font-family:var(--mono);font-size:10px;color:var(--text3);margin-left:auto;}
-  .history-layout{display:flex;flex-direction:column;height:100%;overflow:hidden;}
-  .history-scroll{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;}
+  .history-layout{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;}
+  .history-scroll{flex:1;overflow-y:auto;padding:16px 16px 28px;display:flex;flex-direction:column;gap:10px;scroll-padding-bottom:28px;}
   .history-item{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;cursor:pointer;transition:all 0.15s;}
   .history-item:hover{border-color:var(--border2);background:var(--bg3);}
   .history-meta{display:flex;align-items:center;gap:8px;margin-bottom:5px;}
@@ -216,10 +221,10 @@ const CSS = `
   .toast{position:fixed;bottom:24px;right:24px;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 16px;font-size:13px;color:var(--text);z-index:1000;animation:fadeUp 0.2s ease;box-shadow:0 4px 24px rgba(0,0,0,0.4);}
   .share-box{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 14px;display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;color:var(--accent);}
   .share-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .repo-file-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;}
+  .repo-file-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;overflow:visible;}
   .repo-file-path{font-family:var(--mono);font-size:12px;color:var(--accent);margin-bottom:6px;}
-  .repo-file-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-  .translate-layout{display:grid;grid-template-columns:1fr 1fr;height:100%;overflow:hidden;gap:0;}
+  .repo-file-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;}
+  .translate-layout{display:grid;grid-template-columns:1fr 1fr;flex:1;overflow:hidden;gap:0;min-height:0;}
 `;
 
 function Toast({ message, onDone }) {
@@ -267,7 +272,7 @@ function IssueCard({ issue, onApplyFix, applied, onFixHistoryAdd }) {
 }
 
 // ─── REVIEW PANEL ─────────────────────────────────────────────────────────────
-function ReviewPanel({ onAnalyze, addHistory }) {
+function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, sharedError }) {
   const [code, setCode]         = useState("");
   const [lang, setLang]         = useState("python");
   const [focus, setFocus]       = useState("");
@@ -282,6 +287,18 @@ function ReviewPanel({ onAnalyze, addHistory }) {
   const [sharing, setSharing]   = useState(false);
   const [fixHistory, setFixHistory] = useState(loadFixHistory);
   const sessions = loadSessions();
+
+  useEffect(() => {
+    if (!sharedReview) return;
+    setCode(sharedReview.code || "");
+    setLang(sharedReview.language || detectLanguage(sharedReview.code || ""));
+    setResult(sharedReview.result || null);
+    setFixHistory(sharedReview.fix_history || []);
+    setAppliedFixes(new Set());
+    setError(null);
+    setShowDiff(false);
+    setShareId(sharedReview.id || null);
+  }, [sharedReview]);
 
   const handleCodeChange = (val) => { setCode(val); setLang(detectLanguage(val)); };
 
@@ -386,7 +403,9 @@ function ReviewPanel({ onAnalyze, addHistory }) {
         <div className="results-scroll">
           {loading && <div className="loading-row"><span className="spinner"/>Nova 2 Lite analyzing…</div>}
           {error && <div className="error-banner">⚠ {error}</div>}
-          {!loading && !result && !error && (
+          {sharedLoading && <div className="loading-row"><span className="spinner"/>Loading shared review…</div>}
+          {!sharedLoading && sharedError && <div className="error-banner">⚠ {sharedError}</div>}
+          {!loading && !result && !error && !sharedLoading && !sharedError && (
             <div className="empty-state">
               <div className="empty-icon">🔍</div>
               <div className="empty-title">No analysis yet</div>
@@ -409,8 +428,8 @@ function ReviewPanel({ onAnalyze, addHistory }) {
               {shareId && (
                 <div className="share-box">
                   <span style={{fontSize:13}}>🔗</span>
-                  <span className="share-url">localhost:8000/api/share/{shareId}</span>
-                  <button className="btn btn-ghost btn-sm" onClick={()=>{navigator.clipboard.writeText(`http://localhost:8000/api/share/${shareId}`);setToast("✓ URL copied!");}}>Copy URL</button>
+                  <span className="share-url">{buildShareUrl(shareId)}</span>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{navigator.clipboard.writeText(buildShareUrl(shareId));setToast("✓ URL copied!");}}>Copy URL</button>
                 </div>
               )}
               {showDiff && result.refactored && (
@@ -819,9 +838,18 @@ function ScreenshotPanel({ addHistory }) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
 
+  useEffect(() => {
+    return () => {
+      if (preview) URL.revokeObjectURL(preview);
+    };
+  }, [preview]);
+
   const handleFile = async (file) => {
     if (!file||!file.type.startsWith("image/")) return;
-    setPreview(URL.createObjectURL(file));
+    setPreview(prev => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
     setLoading(true); setResult(null); setError(null);
     const fd = new FormData(); fd.append("file",file);
     try {
@@ -898,10 +926,27 @@ export default function App() {
   const [reviewContext, setReviewContext] = useState(null);
   const [history, setHistory] = useState([]);
   const [apiStatus, setApiStatus] = useState("checking");
+  const [sharedReview, setSharedReview] = useState(null);
+  const [sharedLoading, setSharedLoading] = useState(false);
+  const [sharedError, setSharedError] = useState(null);
 
   useEffect(()=>{
     api.get("/api/health").then(d=>setApiStatus(!d.mock_mode?"ok":"mock")).catch(()=>setApiStatus("error"));
   },[]);
+
+  useEffect(() => {
+    const shareId = getShareIdFromLocation();
+    if (!shareId) return;
+
+    setActivePanel("review");
+    setSharedLoading(true);
+    setSharedError(null);
+
+    api.get(`/api/share/${shareId}`)
+      .then(data => setSharedReview(data))
+      .catch(err => setSharedError(err.message || "Failed to load shared review"))
+      .finally(() => setSharedLoading(false));
+  }, []);
 
   const addHistory = (type, preview) => setHistory(h=>[...h,{type,preview,time:now()}]);
   const handleAnalyze = (ctx) => setReviewContext(ctx);
@@ -966,7 +1011,7 @@ export default function App() {
           <div className="panel-header">
             <div><div className="panel-title">{panelInfo[activePanel].title}</div><div className="panel-sub">{panelInfo[activePanel].sub}</div></div>
           </div>
-          {activePanel==="review"     && <ReviewPanel onAnalyze={handleAnalyze} addHistory={addHistory}/>}
+          {activePanel==="review"     && <ReviewPanel onAnalyze={handleAnalyze} addHistory={addHistory} sharedReview={sharedReview} sharedLoading={sharedLoading} sharedError={sharedError}/>}
           {activePanel==="voice"      && <VoicePanel context={reviewContext}/>}
           {activePanel==="research"   && <ResearchPanel addHistory={addHistory}/>}
           {activePanel==="translate"  && <TranslatePanel addHistory={addHistory}/>}
