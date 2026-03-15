@@ -146,8 +146,9 @@ const CSS = `
   .score-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;}
   .score-summary{font-size:12px;color:var(--text2);line-height:1.6;}
   .diff-view{display:grid;grid-template-columns:1fr 1fr;gap:0;border-radius:6px;border:1px solid var(--border);overflow:hidden;min-height:0;}
+  .diff-pane{display:flex;flex-direction:column;min-height:0;}
   .diff-header{font-family:var(--mono);font-size:10px;padding:6px 10px;border-bottom:1px solid var(--border);letter-spacing:0.5px;}
-  .diff-code{font-family:var(--mono);font-size:12px;padding:10px;line-height:1.7;white-space:pre-wrap;overflow:auto;max-height:320px;}
+  .diff-code{font-family:var(--mono);font-size:12px;padding:10px;line-height:1.7;white-space:pre-wrap;overflow:auto;max-height:520px;}
   .diff-old{background:rgba(239,68,68,0.06);color:#fca5a5;}
   .diff-new{background:rgba(34,197,94,0.06);color:#a8d8b0;border-left:1px solid var(--border);}
   .filter-bar{display:flex;gap:6px;flex-wrap:wrap;}
@@ -274,6 +275,7 @@ function IssueCard({ issue, onApplyFix, applied, onFixHistoryAdd }) {
 // ─── REVIEW PANEL ─────────────────────────────────────────────────────────────
 function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, sharedError }) {
   const [code, setCode]         = useState("");
+  const [analyzedCode, setAnalyzedCode] = useState("");
   const [lang, setLang]         = useState("python");
   const [focus, setFocus]       = useState("");
   const [filter, setFilter]     = useState("ALL");
@@ -291,6 +293,7 @@ function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, share
   useEffect(() => {
     if (!sharedReview) return;
     setCode(sharedReview.code || "");
+    setAnalyzedCode(sharedReview.code || "");
     setLang(sharedReview.language || detectLanguage(sharedReview.code || ""));
     setResult(sharedReview.result || null);
     setFixHistory(sharedReview.fix_history || []);
@@ -306,6 +309,7 @@ function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, share
     if (!code.trim()) return;
     setLoading(true); setResult(null); setError(null); setAppliedFixes(new Set()); setShowDiff(false); setShareId(null);
     try {
+      setAnalyzedCode(code);
       const data = await api.post("/api/review", {code, language:lang, focus:focus||undefined});
       setResult(data);
       const s = loadSessions(); s.push({code,lang,result:data,time:new Date().toISOString()}); saveSessions(s);
@@ -342,6 +346,9 @@ function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, share
 
   const filteredIssues = result?.issues?.filter(i=>filter==="ALL"||i.severity===filter)??[];
   const langs = ["python","javascript","typescript","go","java","rust","c++","ruby","php"];
+  const diffOriginal = analyzedCode || code;
+  const diffUpdated = code !== analyzedCode ? code : (result?.refactored || "");
+  const canShowDiff = showDiff && diffOriginal && diffUpdated && diffOriginal !== diffUpdated;
 
   return (
     <div className="review-layout">
@@ -359,7 +366,7 @@ function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, share
           </select>
           <span className="lang-badge">{code.split("\n").length} lines</span>
           <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-            <button className="btn btn-ghost btn-sm" onClick={()=>{setCode("");setResult(null);setError(null);setShareId(null);}}>Clear</button>
+            <button className="btn btn-ghost btn-sm" onClick={()=>{setCode("");setAnalyzedCode("");setResult(null);setError(null);setShareId(null);}}>Clear</button>
             <button className="btn btn-primary btn-sm" onClick={handleAnalyze} disabled={loading||!code.trim()}>
               {loading?<><span className="spinner" style={{width:11,height:11}}/>Analyzing…</>:"▶ Analyze"}
             </button>
@@ -369,7 +376,7 @@ function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, share
           <div style={{padding:"8px 16px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:8}}>
             <span style={{fontSize:11,color:"var(--text3)"}}>Recent:</span>
             {sessions.slice(-3).reverse().map((s,i)=>(
-              <button key={i} className="btn btn-ghost btn-sm" onClick={()=>{setCode(s.code);setLang(s.lang);setResult(s.result);}}>
+              <button key={i} className="btn btn-ghost btn-sm" onClick={()=>{setCode(s.code);setAnalyzedCode(s.code);setLang(s.lang);setResult(s.result);}}>
                 {s.lang} · {new Date(s.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}
               </button>
             ))}
@@ -432,10 +439,10 @@ function ReviewPanel({ onAnalyze, addHistory, sharedReview, sharedLoading, share
                   <button className="btn btn-ghost btn-sm" onClick={()=>{navigator.clipboard.writeText(buildShareUrl(shareId));setToast("✓ URL copied!");}}>Copy URL</button>
                 </div>
               )}
-              {showDiff && result.refactored && (
+              {canShowDiff && (
                 <div className="diff-view">
-                  <div><div className="diff-header" style={{background:"rgba(239,68,68,0.1)",color:"#f87171"}}>− Original</div><pre className="diff-code diff-old">{code}</pre></div>
-                  <div><div className="diff-header" style={{background:"rgba(34,197,94,0.1)",color:"#4ade80"}}>+ Refactored</div><pre className="diff-code diff-new">{result.refactored}</pre></div>
+                  <div className="diff-pane"><div className="diff-header" style={{background:"rgba(239,68,68,0.1)",color:"#f87171"}}>− Original</div><pre className="diff-code diff-old">{analyzedCode || code}</pre></div>
+                  <div className="diff-pane"><div className="diff-header" style={{background:"rgba(34,197,94,0.1)",color:"#4ade80"}}>{code !== analyzedCode ? "+ Updated" : "+ Refactored"}</div><pre className="diff-code diff-new">{diffUpdated}</pre></div>
                 </div>
               )}
               {filteredIssues.map((issue,i)=>(
