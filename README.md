@@ -19,64 +19,190 @@ DevPilot AI uses Amazon Nova models for a multi-step debugging workflow:
 
 ## Features
 
-### Core workflow
+### 1. Code Review Panel
 
-1. Code Review
-   Paste code and get a structured review with score, findings, positives, and a refactored version.
+The Code Review panel is the main workflow entry point. You paste code into the editor, select or auto-detect the language, and run a Nova-backed review.
 
-2. Voice Debug
-   Ask follow-up questions about the reviewed code by text or browser mic input.
+Included review features:
 
-3. Doc Research
-   Enter a bug or problem statement and get a researched solution with warnings and sources.
+- Severity-ranked findings with `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW`
+- Overall code quality score
+- One-line summary of the code state
+- Per-issue title, description, line number, and fix
+- Positive observations section
+- Full refactored version section
+- Focus selector for security, performance, or bug-oriented reviews
+- Auto language detection while typing or pasting
+- Review history entry creation after each run
 
-4. Screenshot Analysis
-   Upload or drag-drop a screenshot and get visual issue detection plus suggestions.
+### 2. Apply Fix
 
-### Review productivity features
+Each issue card includes an `Apply Fix` button. Clicking it replaces the editor content with that issue's suggested fix and marks the issue as applied.
 
-5. Apply Fix
-   Apply an issue's fix directly into the editor.
+Related behavior:
 
-6. Copy Fix
-   Copy any suggested fix with one click.
+- Green applied badge on the issue card
+- Fix application toast message
+- Fix acceptance is recorded in Fix History
 
-7. Confidence Score
-   Each review issue shows a confidence bar based on severity.
+### 3. Reject Fix
 
-8. Auto Language Detection
-   Detects common languages from pasted code.
+Each issue can also be rejected. Rejecting a fix does not change the editor code, but the decision is stored in Fix History for later review.
 
-9. Issue Filter
-   Filter review findings by `ALL`, `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`.
+### 4. Copy Fix
 
-10. Diff View
-    Compare original code and refactored output side by side.
+Every fix block includes a `Copy` button with copied-state feedback so the suggested code can be copied without applying it.
 
-11. Export Report
-    Export a review as a Markdown report.
+### 5. Confidence Score
 
-12. Share Review
-    Create a share link for a review and reopen it in the frontend with `?share=<id>`.
+Every issue includes a confidence label and progress bar to show how strongly the system believes the issue is valid.
 
-### Session and history features
+### 6. Issue Filters
 
-13. Save Session
-    Reviews are stored in localStorage and can be reopened later.
+The results pane includes filter buttons for:
 
-14. Fix History
-    Accepted and rejected fixes are tracked with timestamps and severity.
+- `ALL`
+- `CRITICAL`
+- `HIGH`
+- `MEDIUM`
+- `LOW`
 
-15. Session History
-    Voice, research, translation, repo, screenshot, and review actions are tracked in the UI.
+This lets the user narrow the visible issues without rerunning the review.
 
-### Advanced panels
+### 7. Diff View
 
-16. Language Translation
-    Translate code between languages with translated output, differences, and notes.
+The review panel includes a `Diff` button that compares:
 
-17. Repo Review
-    Review a public GitHub repo, fetch up to 10 source files, and show aggregate findings.
+- original analyzed code
+- updated editor code after applying a fix, or
+- the model's full refactored version when no direct fix has been applied
+
+This makes it possible to inspect what changed before keeping or exporting the result.
+
+### 8. Apply All
+
+The `Apply All` button applies the model's full refactored version to the editor and marks all issues as applied.
+
+### 9. Export Report
+
+The `Export` button downloads the current review as a Markdown report containing:
+
+- language
+- score
+- summary
+- issue list
+- fixes
+- positives
+- refactored output
+
+### 10. Share Review
+
+The `Share` button sends the current review to the backend and creates a shareable link.
+
+Share flow includes:
+
+- backend persistence in `backend/shares/`
+- unique 8-character share ID
+- frontend share URL using `?share=<id>`
+- raw API JSON share endpoint
+- shared review loading directly into the UI
+
+### 11. Save Session
+
+Completed reviews are stored in browser localStorage so they can be reopened later.
+
+Saved session behavior:
+
+- stores code, language, result, and timestamp
+- shows recent saved reviews in the review panel
+- shows saved sessions in the History panel
+
+### 12. Fix History
+
+Fix History tracks every accepted and rejected fix across sessions.
+
+Each entry stores:
+
+- action
+- issue title
+- severity
+- timestamp
+
+### 13. Session History
+
+The History panel tracks what happened during the current session, including review, voice, research, translation, repo, and screenshot actions.
+
+### 14. Voice Debug Panel
+
+The Voice Debug panel lets the user ask follow-up questions about the current code review.
+
+Voice features include:
+
+- text input
+- browser speech-recognition mic input
+- multi-turn history
+- code-aware follow-up responses
+- optional code snippets in answers
+
+### 15. Doc Research Panel
+
+The Research panel helps investigate bugs, errors, or implementation questions.
+
+Research output includes:
+
+- explanation
+- code example
+- steps to apply
+- warnings / gotchas
+- linked sources
+
+### 16. Screenshot Analysis Panel
+
+The Screenshot panel accepts image uploads or drag-and-drop screenshots from an IDE, browser, app UI, or terminal.
+
+Screenshot output includes:
+
+- detected screen type
+- what the model sees
+- context summary
+- issue list
+- suggestions
+
+### 17. Language Translation Panel
+
+The Translate panel rewrites code from one language to another.
+
+Translation output includes:
+
+- translated code
+- key differences between languages
+- migration notes
+- copy support for translated code
+
+### 18. Repo Review Panel
+
+The Repo Review panel accepts a public GitHub repository URL and reviews up to 10 source files through the backend.
+
+Repo review output includes:
+
+- average score
+- critical count
+- high count
+- files reviewed count
+- per-file summaries
+- top issues per file
+
+### 19. Shared UI and UX Features
+
+The app also includes a set of smaller but important workflow features:
+
+- toast notifications for user actions
+- copy-to-clipboard helpers
+- share URL copy action
+- loading indicators for all async flows
+- mock mode support when AWS credentials are missing
+- browser-tab and manifest branding
+- responsive scroll handling for long result blocks and diffs
 
 ## Project Structure
 
