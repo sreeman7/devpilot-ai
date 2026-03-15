@@ -4,6 +4,10 @@ AI developer copilot built for the Amazon Nova AI Hackathon 2026.
 
 DevPilot AI combines Amazon Nova models with a FastAPI backend and a React frontend to review code, explain issues, research docs, translate code, inspect repositories, and analyze screenshots in one UI.
 
+## Demo
+
+[Watch the demo on YouTube](https://youtu.be/Pyd1PeLRbSQ?si=G9A4RxOc_8rZc8Xz)
+
 ## What It Does
 
 DevPilot AI uses Amazon Nova models for a multi-step debugging workflow:
